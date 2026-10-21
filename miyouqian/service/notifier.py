@@ -33,7 +33,7 @@ _WECOM_SEND_LOCKS: dict[str, threading.Lock] = {}
 _WECOM_NEXT_SEND: dict[str, float] = {}
 
 
-def send_task_push(config: dict[str, Any], lines: list[str]) -> str:
+def send_task_push(config: dict[str, Any], lines: list[str], log_url: str = "") -> str:
     """发送签到结果推送，标题要如实反映成败，不能不管有没有失败都说「任务完成」。"""
     balance_insufficient = has_damagou_balance_insufficient(lines)
     success = False if balance_insufficient else is_task_success(lines)
@@ -41,10 +41,16 @@ def send_task_push(config: dict[str, Any], lines: list[str]) -> str:
         title = "打码狗余额不足"
     else:
         title = "米游签任务完成" if success else "米游签任务失败"
-    return send_push(config, title, "\n".join(lines), success=success)
+    return send_push(config, title, "\n".join(lines), success=success, log_url=log_url)
 
 
-def send_push(config: dict[str, Any], title: str, message: str, success: bool = True) -> str:
+def send_push(
+    config: dict[str, Any],
+    title: str,
+    message: str,
+    success: bool = True,
+    log_url: str = "",
+) -> str:
     push = config.get("push") or {}
     if not push.get("enable"):
         return ""
@@ -59,7 +65,7 @@ def send_push(config: dict[str, Any], title: str, message: str, success: bool = 
             for channel in channels:
                 provider = str(channel.get("provider") or "").strip().lower()
                 try:
-                    _send(client, provider, channel, title, message, success)
+                    _send(client, provider, channel, title, message, success, log_url)
                     results.append(f"{provider}: 成功")
                 except Exception as exc:
                     results.append(f"{provider}: 失败 ({exc})")
@@ -273,7 +279,15 @@ def _send_exchange(
     raise ValueError(f"不支持的推送通道: {provider}")
 
 
-def _send(client: httpx.Client, provider: str, push: dict[str, Any], title: str, message: str, success: bool) -> None:
+def _send(
+    client: httpx.Client,
+    provider: str,
+    push: dict[str, Any],
+    title: str,
+    message: str,
+    success: bool,
+    log_url: str = "",
+) -> None:
     token = str(push.get("token") or "").strip()
     webhook = str(push.get("webhook") or "").strip()
     topic = str(push.get("topic") or "").strip()
@@ -372,7 +386,7 @@ def _send(client: httpx.Client, provider: str, push: dict[str, Any], title: str,
     if provider == "dingrobot":
         require(webhook, "webhook")
         url = signed_ding_url(webhook, secret) if secret else webhook
-        request_json(client, "POST", url, json={"msgtype": "markdown", "markdown": {"title": title, "text": build_dingtalk(title, message, success)}})
+        request_json(client, "POST", url, json={"msgtype": "markdown", "markdown": {"title": title, "text": build_dingtalk(title, message, success, log_url)}})
         return
 
     if provider == "feishubot":
@@ -518,7 +532,7 @@ DING_DOT_BY_COLOR = {
 }
 
 
-def build_dingtalk(title: str, message: str, success: bool) -> str:
+def build_dingtalk(title: str, message: str, success: bool, log_url: str = "") -> str:
     """钉钉任务通知：骨架在 templates/push/dingtalk.md，不定长重复段在这里拼。"""
     lines = normalize_message_lines(message)
     summary = build_structured_summary(lines, success)
@@ -532,7 +546,7 @@ def build_dingtalk(title: str, message: str, success: bool) -> str:
             "status_text": format_status(success),
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "account_sections": "\n\n".join(section for section in sections if section) or "- 无账号信息",
-            "log_lines": build_ding_log_lines(lines),
+            "log_block": build_ding_log_block(lines, log_url),
         },
     )
 
@@ -548,12 +562,16 @@ def build_ding_account_block(section: dict[str, Any]) -> str:
         f"{ding_dot(task['color'])} {task['label']}（{task['done']}/{task['total']}）"
         for task in bbs["tasks"]
     ]
+    # 仓库自带的 bbs["present"] 只要日志里含「社区签到」字样就为真，会被「游戏社区签到」误命中，
+    # 这里按实际数据判断：既没有汇总行、四类任务也全部未执行时，说明本轮没跑米游币任务。
+    has_bbs = bool(bbs["summary"]) or any(task["label"] != "未执行" for task in bbs["tasks"])
     blocks = [
         f"#### 👤 {section['label']}",
         build_ding_result_block("🎮", "游戏社区签到", section["game"]),
         build_ding_result_block("☁️", "云游戏签到", section["cloud_game"]),
-        header + ("\n\n" + "\n".join(rows) if rows else ""),
     ]
+    if has_bbs:
+        blocks.append(header + ("\n\n" + "\n".join(rows) if rows else ""))
     return "\n\n".join(block for block in blocks if block)
 
 
@@ -569,7 +587,10 @@ def build_ding_result_block(icon: str, name: str, result: dict[str, Any]) -> str
     return header + ("\n\n" + "\n".join(items) if items else "")
 
 
-def build_ding_log_lines(lines: list[str]) -> str:
+def build_ding_log_block(lines: list[str], log_url: str) -> str:
+    """有链接就只放链接；内联时行间插一行空引用，否则钉钉会把单换行折成一行连续文字。"""
+    if log_url:
+        return f"> 📄 完整详细日志：[点开查看]({log_url})"
     rows: list[str] = []
     used = 0
     truncated = False
@@ -584,7 +605,7 @@ def build_ding_log_lines(lines: list[str]) -> str:
         rows.append("> …（余下日志已截断）")
     if not rows:
         rows.append("> 无详细日志")
-    return "\n".join(rows)
+    return "\n>\n".join(rows)
 
 
 def build_ding_bar(done_percent: int, failed_percent: int) -> str:

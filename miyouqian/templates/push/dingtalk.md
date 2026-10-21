@@ -6,4 +6,4 @@
 
 **📋 详细日志**
 
-{{log_lines}}
+{{log_block}}

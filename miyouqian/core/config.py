@@ -80,6 +80,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 5890,
         "password": "",
+        "public_base": "",
     },
 }
 
@@ -177,6 +178,7 @@ def normalize_config(config: dict[str, Any]) -> None:
     web.setdefault("host", "127.0.0.1")
     web.setdefault("port", 5890)
     web.setdefault("password", "")
+    web["public_base"] = str(web.get("public_base") or "").strip().rstrip("/")
     features = config.setdefault("features", {})
     features.setdefault("game_checkin", True)
     features.setdefault("cloud_game_checkin", False)

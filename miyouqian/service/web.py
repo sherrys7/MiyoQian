@@ -10,6 +10,7 @@ import io
 import json
 import mimetypes
 import pathlib
+import re
 import secrets
 import threading
 from datetime import datetime
@@ -52,6 +53,9 @@ QQ_BIND_TIMEOUT = 90
 # 密码认证工具
 # ---------------------------------------------------------------------------
 AUTH_COOKIE = "myq_token"
+
+RUN_LOG_KEEP = 20
+RUN_LOG_SLUG = re.compile(r"\d{8}-\d{6}")
 
 
 def hash_password(password: str) -> str:
@@ -191,10 +195,38 @@ class WebApp:
                 self.log(push_result, "push")
             raise
         self.log("任务编排完成，准备发送推送", "task")
-        push_result = send_task_push(config, lines)
+        push_result = send_task_push(config, lines, self.publish_run_log(lines))
         if push_result:
             self.log(push_result, "push")
         return []
+
+    def run_log_dir(self) -> pathlib.Path:
+        with self.lock:
+            config = copy.deepcopy(self.config)
+        return log_path(self.config_path, config).parent / "runs"
+
+    def publish_run_log(self, lines: list[str]) -> str:
+        """把本次详细日志写成文件并返回推送用的链接；没配 web.public_base 就返回空串走内联。"""
+        with self.lock:
+            base = str(self.config.get("web", {}).get("public_base") or "").strip()
+        if not base:
+            return ""
+        directory = self.run_log_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        (directory / f"{stamp}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        for stale in sorted(directory.glob("*.txt"), reverse=True)[RUN_LOG_KEEP:]:
+            stale.unlink(missing_ok=True)
+        return f"{base.rstrip('/')}/api/run-log/{stamp}"
+
+    def read_run_log(self, slug: str) -> str:
+        directory = self.run_log_dir().resolve()
+        if not RUN_LOG_SLUG.fullmatch(slug):
+            raise ValueError("日志编号非法")
+        target = (directory / f"{slug}.txt").resolve()
+        if target.parent != directory or not target.is_file():
+            raise FileNotFoundError("日志不存在或已被清理")
+        return target.read_text(encoding="utf-8")
 
     def test_push_channels(self) -> str:
         with self.lock:
@@ -1106,6 +1138,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self._is_authenticated() and path.startswith("/api/"):
                 self.send_error_json("未登录", HTTPStatus.UNAUTHORIZED)
                 return
+            if path.startswith("/api/run-log/"):
+                self.send_text(self.app.read_run_log(path.rsplit("/", 1)[-1]))
+                return
             if path == "/api/config":
                 self.send_json(self.app.get_config())
                 return
@@ -1319,6 +1354,15 @@ class Handler(BaseHTTPRequestHandler):
         if set_cookie:
             # 7 天过期 (7 * 24 * 60 * 60 = 604800 秒)
             self.send_header("Set-Cookie", f"{AUTH_COOKIE}={set_cookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def send_text(self, text: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        raw = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
 
