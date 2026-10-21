@@ -578,9 +578,12 @@ def build_ding_account_block(section: dict[str, Any]) -> str:
 def build_ding_result_block(icon: str, name: str, result: dict[str, Any]) -> str:
     if not result["present"]:
         return ""
+    skipped = int(result["skipped"] or 0)
+    label = f"{result['label']}（跳过 {skipped}）" if skipped else result["label"]
     header = (
-        f"**{icon} {name}** {build_ding_bar(result['done_percent'], result['failed_percent'])} "
-        f"{ding_dot(result['color'])} **{result['label']}**"
+        f"**{icon} {name}** "
+        f"{build_ding_bar(result['done_percent'], result['failed_percent'], result['success'], result['failed'], skipped)} "
+        f"{ding_dot(result['color'])} **{label}**"
     )
     items = [f"- ✅ {sanitize_ding_text(item)}" for item in result["items"][:DING_ITEM_LIMIT]]
     items += [f"- ❌ {sanitize_ding_text(item)}" for item in result["failed_items"][:DING_ITEM_LIMIT]]
@@ -608,10 +611,18 @@ def build_ding_log_block(lines: list[str], log_url: str) -> str:
     return "\n>\n".join(rows)
 
 
-def build_ding_bar(done_percent: int, failed_percent: int) -> str:
-    """固定 10 格，顺序同 HTML 渐变条：先红（失败的尝试）、再蓝（成功）、末尾灰（未执行）。"""
-    red = min(round(failed_percent / 10), DING_BAR_CELLS)
-    blue = min(round(done_percent / 10), DING_BAR_CELLS - red)
+def build_ding_bar(done_percent: int, failed_percent: int, done: int = 0, failed: int = 0, skipped: int = 0) -> str:
+    """固定 10 格，顺序同 HTML 渐变条：先红（失败的尝试）、再蓝（成功）、末尾灰（未执行）。
+
+    有跳过项时按「已执行 ÷ 总数」压缩彩色段，让灰格体现"有几个游戏本轮根本没做"。
+    """
+    attempted = done + failed
+    if attempted and attempted + skipped:
+        work = min(max(round(attempted / (attempted + skipped) * DING_BAR_CELLS), 1), DING_BAR_CELLS)
+    else:
+        work = DING_BAR_CELLS
+    red = min(round(failed_percent / 100 * work), work)
+    blue = min(round(done_percent / 100 * work), work - red)
     return "🟥" * red + "🟦" * blue + "⬜" * (DING_BAR_CELLS - red - blue)
 
 
