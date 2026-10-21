@@ -519,16 +519,22 @@ DING_DOT_BY_COLOR = {
 
 
 def build_dingtalk(title: str, message: str, success: bool) -> str:
-    """钉钉 markdown 版任务通知：只用钉钉支持的语法复刻 pushplus 的层次与进度语义。"""
+    """钉钉任务通知：骨架在 templates/push/dingtalk.md，不定长重复段在这里拼。"""
     lines = normalize_message_lines(message)
     summary = build_structured_summary(lines, success)
-    blocks = [
-        f"## {'🎉' if success else '⚠️'} {title}",
-        f"> {'🟢' if success else '🔴'} **{format_status(success)}** ｜ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-    ]
-    blocks.extend(build_ding_account_block(section) for section in summary["sections"])
-    blocks.append(build_ding_log_block(lines))
-    return "\n\n".join(block for block in blocks if block)
+    sections = [build_ding_account_block(section) for section in summary["sections"]]
+    return render_template(
+        "dingtalk.md",
+        {
+            "result_mark": "🎉" if success else "⚠️",
+            "status_dot": "🟢" if success else "🔴",
+            "title_text": title,
+            "status_text": format_status(success),
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "account_sections": "\n\n".join(section for section in sections if section) or "- 无账号信息",
+            "log_lines": build_ding_log_lines(lines),
+        },
+    )
 
 
 def build_ding_account_block(section: dict[str, Any]) -> str:
@@ -563,7 +569,7 @@ def build_ding_result_block(icon: str, name: str, result: dict[str, Any]) -> str
     return header + ("\n\n" + "\n".join(items) if items else "")
 
 
-def build_ding_log_block(lines: list[str]) -> str:
+def build_ding_log_lines(lines: list[str]) -> str:
     rows: list[str] = []
     used = 0
     truncated = False
@@ -578,7 +584,7 @@ def build_ding_log_block(lines: list[str]) -> str:
         rows.append("> …（余下日志已截断）")
     if not rows:
         rows.append("> 无详细日志")
-    return "**📋 详细日志**\n\n" + "\n".join(rows)
+    return "\n".join(rows)
 
 
 def build_ding_bar(done_percent: int, failed_percent: int) -> str:
@@ -608,25 +614,12 @@ def build_dingtalk_exchange(
     plan: dict[str, Any],
     success: bool,
 ) -> str:
+    """钉钉兑换通知：固定行交给 templates/push/exchange_dingtalk.md，只有商品图是条件段。"""
     context = build_exchange_template_context(title, goods_name, result, plan, success)
-    blocks = ["## 🎁 米游签商品兑换通知"]
     icon = str(plan.get("icon") or "").strip()
-    if icon:
-        blocks.append(f"![商品图]({icon})")
-    blocks.append(f"> {'🟢' if success else '🔴'} **{context['status_text']}** ｜ {context['time']}")
-    blocks.append(f"**{context['goods_name_text']}**")
-    blocks.append(
-        "\n".join(
-            [
-                f"- 💰 价格：**{context['price']} 米游币**",
-                f"- 👤 账号：{context['account_name_text']}",
-                f"- 🔄 尝试次数：{context['attempt']} 次",
-                f"- 📊 结果：{context['message_text']}（retcode {context['retcode']}）",
-            ]
-        )
-    )
-    blocks.append(f"> 💡 {context['status_text']}后请到米游社查看订单详情，确认商品兑换状态。")
-    return "\n\n".join(blocks)
+    context["status_dot"] = "🟢" if success else "🔴"
+    context["icon_block"] = f"![商品图]({icon})\n\n" if icon else ""
+    return render_template("exchange_dingtalk.md", context)
 
 
 def build_template_context(title: str, message: str, success: bool, detail_limit: int | None = None) -> dict[str, str]:
