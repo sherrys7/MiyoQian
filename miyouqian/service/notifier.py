@@ -216,7 +216,7 @@ def _send_exchange(
             url,
             json={
                 "msgtype": "markdown",
-                "markdown": {"title": title, "text": build_exchange_markdown(title, goods_name, result, plan, success)},
+                "markdown": {"title": title, "text": build_dingtalk_exchange(title, goods_name, result, plan, success)},
             },
         )
         return
@@ -372,7 +372,7 @@ def _send(client: httpx.Client, provider: str, push: dict[str, Any], title: str,
     if provider == "dingrobot":
         require(webhook, "webhook")
         url = signed_ding_url(webhook, secret) if secret else webhook
-        request_json(client, "POST", url, json={"msgtype": "markdown", "markdown": {"title": title, "text": markdown_message}})
+        request_json(client, "POST", url, json={"msgtype": "markdown", "markdown": {"title": title, "text": build_dingtalk(title, message, success)}})
         return
 
     if provider == "feishubot":
@@ -505,6 +505,128 @@ def build_push_markdown(title: str, message: str, success: bool) -> str:
 
 def build_push_text(title: str, message: str, success: bool) -> str:
     return render_template("text.txt", build_template_context(title, message, success))
+
+
+DING_LOG_LIMIT = 1500
+DING_ITEM_LIMIT = 6
+DING_BAR_CELLS = 10
+DING_DOT_BY_COLOR = {
+    "#168df5": "🔵",
+    "#b83b4b": "🔴",
+    "#a86d12": "🟠",
+    "#627389": "⚪",
+}
+
+
+def build_dingtalk(title: str, message: str, success: bool) -> str:
+    """钉钉 markdown 版任务通知：只用钉钉支持的语法复刻 pushplus 的层次与进度语义。"""
+    lines = normalize_message_lines(message)
+    summary = build_structured_summary(lines, success)
+    blocks = [
+        f"## {'🎉' if success else '⚠️'} {title}",
+        f"> {'🟢' if success else '🔴'} **{format_status(success)}** ｜ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+    blocks.extend(build_ding_account_block(section) for section in summary["sections"])
+    blocks.append(build_ding_log_block(lines))
+    return "\n\n".join(block for block in blocks if block)
+
+
+def build_ding_account_block(section: dict[str, Any]) -> str:
+    bbs = section["bbs"]
+    header = (
+        f"**🪙 米游币获取** {build_ding_bar(bbs['point_percent'], 0)} 🔵 "
+        f"**{bbs['actual_points']}/{bbs['possible_points']}**"
+    )
+    rows = [
+        f"- {task['name']} {build_ding_bar(task['done_percent'], task['failed_percent'])} "
+        f"{ding_dot(task['color'])} {task['label']}（{task['done']}/{task['total']}）"
+        for task in bbs["tasks"]
+    ]
+    blocks = [
+        f"#### 👤 {section['label']}",
+        build_ding_result_block("🎮", "游戏社区签到", section["game"]),
+        build_ding_result_block("☁️", "云游戏签到", section["cloud_game"]),
+        header + ("\n\n" + "\n".join(rows) if rows else ""),
+    ]
+    return "\n\n".join(block for block in blocks if block)
+
+
+def build_ding_result_block(icon: str, name: str, result: dict[str, Any]) -> str:
+    if not result["present"]:
+        return ""
+    header = (
+        f"**{icon} {name}** {build_ding_bar(result['done_percent'], result['failed_percent'])} "
+        f"{ding_dot(result['color'])} **{result['label']}**"
+    )
+    items = [f"- ✅ {sanitize_ding_text(item)}" for item in result["items"][:DING_ITEM_LIMIT]]
+    items += [f"- ❌ {sanitize_ding_text(item)}" for item in result["failed_items"][:DING_ITEM_LIMIT]]
+    return header + ("\n\n" + "\n".join(items) if items else "")
+
+
+def build_ding_log_block(lines: list[str]) -> str:
+    rows: list[str] = []
+    used = 0
+    truncated = False
+    for line in lines:
+        row = f"> {sanitize_ding_line(line)}"
+        used += len(row) + 1
+        if used > DING_LOG_LIMIT:
+            truncated = True
+            break
+        rows.append(row)
+    if truncated:
+        rows.append("> …（余下日志已截断）")
+    if not rows:
+        rows.append("> 无详细日志")
+    return "**📋 详细日志**\n\n" + "\n".join(rows)
+
+
+def build_ding_bar(done_percent: int, failed_percent: int) -> str:
+    """固定 10 格，顺序同 HTML 渐变条：先红（失败的尝试）、再蓝（成功）、末尾灰（未执行）。"""
+    red = min(round(failed_percent / 10), DING_BAR_CELLS)
+    blue = min(round(done_percent / 10), DING_BAR_CELLS - red)
+    return "🟥" * red + "🟦" * blue + "⬜" * (DING_BAR_CELLS - red - blue)
+
+
+def ding_dot(color: str) -> str:
+    return DING_DOT_BY_COLOR.get(color, "⚪")
+
+
+def sanitize_ding_line(line: str) -> str:
+    text = sanitize_ding_text(line)
+    return f"▸ {text[2:]}" if text.startswith("# ") else text
+
+
+def sanitize_ding_text(text: str) -> str:
+    return text.replace("**", "").replace("`", "")
+
+
+def build_dingtalk_exchange(
+    title: str,
+    goods_name: str,
+    result: dict[str, Any],
+    plan: dict[str, Any],
+    success: bool,
+) -> str:
+    context = build_exchange_template_context(title, goods_name, result, plan, success)
+    blocks = ["## 🎁 米游签商品兑换通知"]
+    icon = str(plan.get("icon") or "").strip()
+    if icon:
+        blocks.append(f"![商品图]({icon})")
+    blocks.append(f"> {'🟢' if success else '🔴'} **{context['status_text']}** ｜ {context['time']}")
+    blocks.append(f"**{context['goods_name_text']}**")
+    blocks.append(
+        "\n".join(
+            [
+                f"- 💰 价格：**{context['price']} 米游币**",
+                f"- 👤 账号：{context['account_name_text']}",
+                f"- 🔄 尝试次数：{context['attempt']} 次",
+                f"- 📊 结果：{context['message_text']}（retcode {context['retcode']}）",
+            ]
+        )
+    )
+    blocks.append(f"> 💡 {context['status_text']}后请到米游社查看订单详情，确认商品兑换状态。")
+    return "\n\n".join(blocks)
 
 
 def build_template_context(title: str, message: str, success: bool, detail_limit: int | None = None) -> dict[str, str]:
